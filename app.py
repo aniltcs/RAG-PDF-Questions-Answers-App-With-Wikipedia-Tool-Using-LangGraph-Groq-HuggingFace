@@ -35,47 +35,45 @@ class RouteQuery(BaseModel):
     )
 
 class GraphState(TypedDict):
-    question: Annotated[List[AnyMessage], operator.add]
-    generation: List[AIMessage]
+    question: HumanMessage
+    generation: AIMessage
     documents: List[Document]
+    ConversationHistory: List[AnyMessage]
 
 # -------------------------------
 # Node Functions
 # -------------------------------
 def vectorstore_node(state):
-    question_messages = state.get("question", [])
-    human_messages = [m for m in question_messages if isinstance(m, HumanMessage)]
-    question_text = human_messages[-1].content if human_messages else ""
+    question_messages = state["question"]
+    question_text = question_messages.content
     docs = retriever.get_relevant_documents(question_text)
-    return {"documents": docs,"question": question_messages}
+    return {"documents": docs}
 
 def wiki_search(state):
-     question_messages = state.get("question", [])
-     human_messages = [m for m in question_messages if isinstance(m, HumanMessage)]
-     question_text = human_messages[-1].content if human_messages else ""
+     question_messages = state["question"]
+     question_text = question_messages.content
      wiki_text = wikipedia_tool.invoke({"query": question_text})
      doc = Document(page_content=str(wiki_text))
-     return {"documents": [doc],"question": question_messages}
+     return {"documents": [doc]}
 
 def route_question(state):
-     question_messages = state.get("question", [])
-     human_messages = [m for m in question_messages if isinstance(m, HumanMessage)]
-     question_text = human_messages[-1].content if human_messages else ""
-     source = chain.invoke({"question": question_text})
-     if source.datasource == "wiki_search":
+    question_messages = state["question"]
+    question_text = question_messages.content 
+    source = chain.invoke({"question": question_text})
+    if source.datasource == "wiki_search":
         return "wiki_search"
-     elif source.datasource == "vectorstore":
+    elif source.datasource == "vectorstore":
         return "vectorstore"
 
 def generate_answer(state):
-    question_messages = state.get("question", [])
+    question_messages = state["question"]
+    ConversationHistory = state.get("ConversationHistory", [])
     docs = state.get("documents", [])
     context = "\n\n".join([str(d.page_content) for d in docs])
-    human_messages = [m for m in question_messages if isinstance(m, HumanMessage)]
-    question_text = human_messages[-1].content if human_messages else ""
+    question_text = question_messages.content
     # Build conversation memory
     conversation_history = ""
-    for msg in question_messages[:-1]:  # exclude current question
+    for msg in ConversationHistory[:-1]:  # exclude current question
         if isinstance(msg, HumanMessage):
             conversation_history += f"User: {msg.content}\n"
         elif isinstance(msg, AIMessage):
@@ -91,7 +89,9 @@ def generate_answer(state):
     """
     # Ensure we always get a string
     answer_text = llm.invoke(prompt_text)
-    return {"generation": [AIMessage(content=answer_text.content)], "documents": docs, "question": question_messages}
+    return {
+        "generation": AIMessage(content=answer_text.content)
+        }
 
 # -------------------------------
 # Streamlit UI
@@ -173,14 +173,18 @@ Otherwise, use Wikipedia."""
         # Handle user query
         # -------------------------------
         if query:
-            input_question = [HumanMessage(content=str(query))]
-            input_state = {"question": st.session_state.chat_history + input_question}
+            input_question = HumanMessage(content=str(query))
+            st.session_state.chat_history.extend([input_question])
+            input_state = {"question": input_question,"ConversationHistory":st.session_state.chat_history}
             result = app.invoke(input_state)
+            # Append messages to chat history
+            st.session_state.chat_history.extend([result["generation"]])
+
             # -------------------------------
             #  Display Response
             # -------------------------------
             st.subheader("Answer")
-            st.write(result["generation"][0].content)
+            st.write(result["generation"].content)
             st.subheader("Retrieved Documents")
             with st.expander("Show Retrieved Documents", expanded=False):
                 doc_html = """
@@ -196,10 +200,6 @@ Otherwise, use Wikipedia."""
                     doc_html += f"<p><strong>Document {i}:</strong><br>{doc.page_content[:500]}...</p><hr>"
                 doc_html += "</div>"
                 st.markdown(doc_html, unsafe_allow_html=True)
-
-            # Append messages to chat history
-            st.session_state.chat_history.extend(input_question)
-            st.session_state.chat_history.extend(result["generation"])
 
             # -------------------------------
             #  Display chat history
